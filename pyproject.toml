@@ -1,0 +1,16 @@
+[project]
+name = "outcome-game"
+version = "0.1.0"
+description = "Top-down pygame client (Python only)."
+requires-python = ">=3.10"
+dependencies = [
+    "pygame>=2.5.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["outcome_game*"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
