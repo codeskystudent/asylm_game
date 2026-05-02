@@ -13,6 +13,7 @@ from outcome_game.constants import (
     X2011_GRAB_DPS,
 )
 from outcome_game.entities import Combatant, clamp_to_arena
+from outcome_game.survivor_death_revive import resolve_survivor_zero_hp
 from outcome_game.hit_reaction import apply_survivor_hit_speed_boost
 from outcome_game.last_man_standing import last_man_incoming_damage_multiplier
 from outcome_game.x2011_rage import apply_executioner_stun_from_now, rage_damage_multiplier
@@ -154,7 +155,7 @@ def tick_x2011_grab(
     apply_survivor_hit_speed_boost(victim, now)
     if victim.health <= 0:
         victim.health = 0.0
-        victim.dead = True
+        resolve_survivor_zero_hp(victim, now, combatants)
         _release_grab(killer, victim, stun_killer_seconds=0.0, now=now, combatants=combatants)
         return
 

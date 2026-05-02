@@ -1,4 +1,4 @@
-"""2011X: rage after many stuns — speed/damage buff, shorter stuns, round timer pause."""
+"""2011X: rage after many stuns — speed/damage buff, shorter stuns."""
 
 from __future__ import annotations
 
@@ -82,11 +82,11 @@ def apply_executioner_stun_from_now(
     now: float,
     duration: float,
     combatants: list[Combatant] | None = None,
+    *,
+    apply_knockback: bool = True,
 ) -> None:
     """Stun killer for `duration` seconds from now; stacks onto any active stun time."""
     if duration <= 0 or killer.team != "Executioners":
-        return
-    if now < killer.stun_immunity_until:
         return
     d = duration
     if killer.char_id == "X2011" and rage_active(killer, now, combatants):
@@ -111,7 +111,8 @@ def apply_executioner_stun_from_now(
                 s.held_by_kollosios_charge = False
             killer.kollosios_grabbed_survivors = []
         killer.kollosios_charge_until = 0.0
-    _apply_stun_knockback(killer)
+    if apply_knockback:
+        _apply_stun_knockback(killer)
     killer.stun_splash_until = max(killer.stun_splash_until, now + 0.28)
     _bump_stun_count_and_maybe_rage(killer, now, combatants)
 
@@ -124,8 +125,6 @@ def extend_executioner_stun(
 ) -> None:
     """Stack time onto stun end (e.g. Tails beam): new_end = max(stunned_until, now) + add."""
     if additional_duration <= 0 or killer.team != "Executioners":
-        return
-    if now < killer.stun_immunity_until:
         return
     d = additional_duration
     if killer.char_id == "X2011" and rage_active(killer, now, combatants):

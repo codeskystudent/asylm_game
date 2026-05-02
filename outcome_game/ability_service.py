@@ -11,8 +11,8 @@ from outcome_game.constants import (
     KILLER_MELEE_DAMAGE,
     KILLER_MELEE_REACH,
     METAL_CHARGE_DURATION_SECONDS,
+    METAL_CHARGE_WINDUP_SECONDS,
     METAL_CHARGE_DAMAGE_REDUCTION_FLAT,
-    METAL_CHARGE_HP_COST,
     METAL_CHARGE_KILLER_STUN_SECONDS,
     METAL_EGGMAN_HEAL_NEARBY_MULT,
     METAL_EGGMAN_HEAL_NEARBY_RADIUS,
@@ -30,7 +30,8 @@ from outcome_game.constants import (
     KNUCKLES_PUNCH_CHARGE_DAMAGE_MULT,
     KNUCKLES_PUNCH_RELEASE_IFRAMES_SECONDS,
 )
-from outcome_game.entities import Combatant
+from outcome_game.entities import Combatant, heal_ceiling_for
+from outcome_game.survivor_death_revive import resolve_survivor_zero_hp
 from outcome_game.hit_reaction import apply_survivor_hit_speed_boost
 from outcome_game.last_man_standing import last_man_incoming_damage_multiplier
 from outcome_game.x2011_rage import apply_executioner_stun_from_now, rage_damage_multiplier
@@ -58,7 +59,7 @@ def try_use_ability(
     """Returns True if ability fired. Mutates user cooldowns and world state."""
     from outcome_game.character_definitions.registry import get_definition
 
-    if user.dead or user.escaped or now < user.stunned_until:
+    if user.dead or user.downed or user.escaped or now < user.stunned_until:
         return False
     if user.grabbed_by is not None:
         return False
@@ -100,15 +101,23 @@ def tick_healing_auras(combatants: list[Combatant], now: float, dt: float) -> No
             if t is c or t.team != "Survivors" or not t.alive() or t.escaped:
                 continue
             if _flat_dist(c, t) <= r + c.radius + t.radius:
-                t.health = min(t.max_health, t.health + CREAM_HEAL_PER_SECOND * dt)
+                cap = heal_ceiling_for(t)
+                if t.health < cap:
+                    t.health = min(cap, t.health + CREAM_HEAL_PER_SECOND * dt)
 
 
 def tick_metal_self_heal(combatants: list[Combatant], now: float, dt: float) -> None:
-    """Metal Sonic: regenerate self while repair is active."""
+    """Metal Sonic: regenerate self while repair is active; ends when heal cap is reached."""
     for c in combatants:
         if c.char_id != "MetalSonic" or not c.alive() or c.escaped:
             continue
         if c.metal_self_heal_until <= now:
+            c.metal_self_heal_last_flash_sec = -1
+            continue
+        cap = heal_ceiling_for(c)
+        if c.health >= cap - 1e-4:
+            c.health = min(c.health, cap)
+            c.metal_self_heal_until = 0.0
             c.metal_self_heal_last_flash_sec = -1
             continue
         heal_per_sec = METAL_SELF_HEAL_PER_SECOND
@@ -120,30 +129,30 @@ def tick_metal_self_heal(combatants: list[Combatant], now: float, dt: float) -> 
             if _flat_dist(c, ally) <= METAL_EGGMAN_HEAL_NEARBY_RADIUS + c.radius + ally.radius:
                 heal_per_sec *= METAL_EGGMAN_HEAL_NEARBY_MULT
                 break
-        c.health = min(c.max_health, c.health + heal_per_sec * dt)
+        c.health = min(cap, c.health + heal_per_sec * dt)
+        if c.health >= cap - 1e-4:
+            c.health = cap
+            c.metal_self_heal_until = 0.0
+            c.metal_self_heal_last_flash_sec = -1
+            continue
         sec = int(now)
         if sec != c.metal_self_heal_last_flash_sec:
             c.metal_self_heal_last_flash_sec = sec
             c.ability_flash_until = max(c.ability_flash_until, now + 0.16)
 
 
-def process_metal_charge_grab(combatants: list[Combatant], killer: Combatant, now: float) -> None:
-    """During charge window, first collision with killer stuns them and costs HP."""
-    if not killer.alive() or killer.escaped:
-        return
+def tick_metal_charge_windup(combatants: list[Combatant], now: float) -> None:
+    """When killer charge windup ends, start the 8s charge window."""
     for c in combatants:
         if c.char_id != "MetalSonic" or not c.alive() or c.escaped:
             continue
-        if c.metal_charge_until <= now or c.metal_charge_grab_used:
+        if c.metal_charge_windup_until <= 0:
             continue
-        if _flat_dist(c, killer) > c.radius + killer.radius + 10.0:
+        if now < c.metal_charge_windup_until:
             continue
-        apply_executioner_stun_from_now(killer, now, METAL_CHARGE_KILLER_STUN_SECONDS, combatants)
-        c.health -= METAL_CHARGE_HP_COST
-        if c.health <= 0:
-            c.health = 0.0
-            c.dead = True
-        c.metal_charge_grab_used = True
+        c.metal_charge_windup_until = 0.0
+        if c.metal_charge_until <= now:
+            c.metal_charge_until = now + METAL_CHARGE_DURATION_SECONDS
 
 
 def tick_amy_hammer_throw(combatants: list[Combatant], killer: Combatant | None, now: float, dt: float) -> None:
@@ -215,7 +224,11 @@ def _apply_behavior(
     if key == "metal_self_heal":
         if user.char_id != "MetalSonic":
             return False
+        if user.health >= heal_ceiling_for(user) - 1e-4:
+            return False
         if user.metal_charge_until > now:
+            return False
+        if user.metal_charge_windup_until > now:
             return False
         if user.metal_self_heal_until > now:
             return False
@@ -228,9 +241,11 @@ def _apply_behavior(
             return False
         if user.metal_charge_until > now:
             return False
-        # Charge is an active commit action; cancel self-repair lockout so movement works immediately.
+        if user.metal_charge_windup_until > now:
+            return False
+        # Windup then charge; cancel self-repair lockout.
         user.metal_self_heal_until = 0.0
-        user.metal_charge_until = now + METAL_CHARGE_DURATION_SECONDS
+        user.metal_charge_windup_until = now + METAL_CHARGE_WINDUP_SECONDS
         user.metal_charge_grab_used = False
         return True
 
@@ -442,7 +457,14 @@ def melee_attack(
     damage: float,
     combatants: list[Combatant],
 ) -> bool:
-    if not attacker.alive() or not target.alive() or target.escaped:
+    if not attacker.alive() or target.escaped:
+        return False
+    if target.downed:
+        target.dead = True
+        target.downed = False
+        target.health = 0.0
+        return True
+    if not target.alive():
         return False
     if now < attacker.stunned_until:
         return False
@@ -470,6 +492,5 @@ def melee_attack(
     target.health -= dmg * armor * lms
     apply_survivor_hit_speed_boost(target, now)
     if target.health <= 0:
-        target.health = 0
-        target.dead = True
+        resolve_survivor_zero_hp(target, now, combatants)
     return True

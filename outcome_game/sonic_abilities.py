@@ -6,6 +6,7 @@ import math
 
 from outcome_game.constants import (
     DROP_DASH_BOUNCE_DISTANCE,
+    DROP_DASH_FINALE_SECONDS,
     DROP_DASH_HIT_LOCK_SECONDS,
     DROP_DASH_KILLER_STUN_SECONDS,
     DROP_DASH_MAX_BUMPS,
@@ -61,6 +62,7 @@ def try_start_drop_dash(sonic: Combatant, killer: Combatant, now: float) -> bool
         return False
     sonic.drop_dash_end = now + DROP_DASH_MAX_SECONDS
     sonic.drop_dash_bumps = 0
+    sonic.drop_dash_finale_until = 0.0
     sonic.drop_dash_hit_lock_until = 0.0
     sonic.drop_dash_speed = max(
         sonic.base_walk_speed * 1.05,
@@ -131,6 +133,49 @@ def tick_drop_dash_end(sonic: Combatant, now: float) -> None:
         sonic.drop_dash_end = 0.0
         sonic.drop_dash_speed = 0.0
         sonic.drop_dash_bumps = 0
+        sonic.drop_dash_finale_until = 0.0
+
+
+def _knockback_killer_away_from_sonic(
+    sonic: Combatant,
+    killer: Combatant,
+    arena_w: float,
+    arena_h: float,
+    distance: float,
+) -> None:
+    dx = sonic.x - killer.x
+    dy = sonic.y - killer.y
+    d = math.hypot(dx, dy) or 1.0
+    killer.x -= (dx / d) * distance
+    killer.y -= (dy / d) * distance
+    clamp_to_arena(killer, arena_w, arena_h)
+
+
+def tick_drop_dash_finale(
+    sonic: Combatant,
+    killer: Combatant,
+    now: float,
+    arena_w: float,
+    arena_h: float,
+) -> None:
+    """After finale freeze, bounce Sonic away and knock the killer back."""
+    if not _is_sonic(sonic) or sonic.drop_dash_finale_until <= 0:
+        return
+    if now < sonic.drop_dash_finale_until:
+        return
+
+    dx = sonic.x - killer.x
+    dy = sonic.y - killer.y
+    d = math.hypot(dx, dy) or 1.0
+    sonic.x += (dx / d) * DROP_DASH_BOUNCE_DISTANCE
+    sonic.y += (dy / d) * DROP_DASH_BOUNCE_DISTANCE
+    clamp_to_arena(sonic, arena_w, arena_h)
+    _knockback_killer_away_from_sonic(sonic, killer, arena_w, arena_h, DROP_DASH_BOUNCE_DISTANCE)
+
+    sonic.drop_dash_finale_until = 0.0
+    sonic.drop_dash_end = 0.0
+    sonic.drop_dash_speed = 0.0
+    sonic.drop_dash_bumps = 0
 
 
 def process_drop_dash_killer_hits(
@@ -147,26 +192,42 @@ def process_drop_dash_killer_hits(
         return
     if now < sonic.drop_dash_hit_lock_until:
         return
+    if sonic.drop_dash_finale_until > now:
+        return
 
     hit_r = sonic.radius + killer.radius + 4.0
     if _dist(sonic, killer) > hit_r:
         return
 
-    apply_executioner_stun_from_now(killer, now, DROP_DASH_KILLER_STUN_SECONDS, combatants)
+    bumps_after = sonic.drop_dash_bumps + 1
+    is_finale = bumps_after >= DROP_DASH_MAX_BUMPS
+    stun_duration = DROP_DASH_KILLER_STUN_SECONDS + (DROP_DASH_FINALE_SECONDS if is_finale else 0.0)
+
+    apply_executioner_stun_from_now(
+        killer,
+        now,
+        stun_duration,
+        combatants,
+        apply_knockback=False,
+    )
     sonic.health = min(sonic.max_health, sonic.health + 5.0)
-    sonic.drop_dash_bumps += 1
+    sonic.drop_dash_bumps = bumps_after
     sonic.drop_dash_hit_lock_until = now + DROP_DASH_HIT_LOCK_SECONDS
 
     dx = sonic.x - killer.x
     dy = sonic.y - killer.y
     d = math.hypot(dx, dy) or 1.0
-    sonic.x += (dx / d) * DROP_DASH_BOUNCE_DISTANCE
-    sonic.y += (dy / d) * DROP_DASH_BOUNCE_DISTANCE
-    clamp_to_arena(sonic, arena_w, arena_h)
 
-    if sonic.drop_dash_bumps >= DROP_DASH_MAX_BUMPS:
-        sonic.drop_dash_end = now
+    if is_finale:
+        sonic.drop_dash_finale_until = now + DROP_DASH_FINALE_SECONDS
+        sonic.drop_dash_end = max(sonic.drop_dash_end, now + DROP_DASH_FINALE_SECONDS + 0.5)
         sonic.drop_dash_speed = 0.0
+        sonic.ability_flash_until = max(sonic.ability_flash_until, now + DROP_DASH_FINALE_SECONDS)
+    else:
+        _knockback_killer_away_from_sonic(sonic, killer, arena_w, arena_h, DROP_DASH_BOUNCE_DISTANCE)
+        sonic.x += (dx / d) * DROP_DASH_BOUNCE_DISTANCE
+        sonic.y += (dy / d) * DROP_DASH_BOUNCE_DISTANCE
+        clamp_to_arena(sonic, arena_w, arena_h)
 
 
 def pre_movement_tick(combatants: list[Combatant], now: float) -> None:
@@ -189,5 +250,6 @@ def post_movement_tick(
             sync_peelout_partner(c, arena_w, arena_h)
     for c in combatants:
         if _is_sonic(c):
+            tick_drop_dash_finale(c, killer, now, arena_w, arena_h)
             process_drop_dash_killer_hits(c, killer, now, arena_w, arena_h, combatants)
             tick_drop_dash_end(c, now)

@@ -14,6 +14,7 @@ from outcome_game.constants import (
     KOLLOSIOS_BASIC_GRAB_THROW_SPEED,
 )
 from outcome_game.entities import Combatant, clamp_to_arena
+from outcome_game.survivor_death_revive import resolve_survivor_zero_hp
 from outcome_game.hit_reaction import apply_survivor_hit_speed_boost
 from outcome_game.last_man_standing import last_man_incoming_damage_multiplier
 
@@ -98,7 +99,7 @@ def tick_kollosios_basic_grab(
                 apply_survivor_hit_speed_boost(victim, now)
                 if victim.health <= 0:
                     victim.health = 0.0
-                    victim.dead = True
+                    resolve_survivor_zero_hp(victim, now, combatants)
                     killer.kollosios_basic_grab_victim = None
                     killer.kollosios_basic_grab_until = 0.0
                     _release_victim_state(victim)

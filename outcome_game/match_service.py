@@ -7,7 +7,7 @@ from enum import Enum, auto
 
 import pygame
 
-from outcome_game.constants import ARENA_H, ARENA_W, ESCAPE_OPENS_AT_ROUND_FRACTION
+from outcome_game.constants import ARENA_H, ARENA_W, ESCAPE_OPENS_AT_SECONDS_REMAINING
 from outcome_game.entities import Combatant
 
 
@@ -36,16 +36,17 @@ def get_exit_rects() -> list[pygame.Rect]:
     return list(_exit_rects)
 
 
-def is_escape_window_open(now: float, round_start_unix: float, round_duration_initial: float) -> bool:
-    """Exits unlock after ESCAPE_OPENS_AT_ROUND_FRACTION of the *initial* round (e.g. 75% → last 25%)."""
-    d = max(round_duration_initial, 1e-6)
-    return now >= round_start_unix + ESCAPE_OPENS_AT_ROUND_FRACTION * d
+def is_escape_window_open(now: float, round_end_unix: float) -> bool:
+    """True while the displayed round timer has more than 0s left but at most ESCAPE_OPENS_AT_SECONDS_REMAINING."""
+    if now >= round_end_unix:
+        return False
+    remain = round_end_unix - now
+    return remain <= ESCAPE_OPENS_AT_SECONDS_REMAINING
 
 
 def exits_available_for_escape(
     now: float,
-    round_start_unix: float,
-    round_duration_initial: float,
+    round_end_unix: float,
     killer: Combatant,
     combatants: list[Combatant],
 ) -> bool:
@@ -55,7 +56,7 @@ def exits_available_for_escape(
     """
     from outcome_game.x2011_rage import rage_active
 
-    if not is_escape_window_open(now, round_start_unix, round_duration_initial):
+    if not is_escape_window_open(now, round_end_unix):
         return False
     if killer.char_id == "X2011" and rage_active(killer, now, combatants):
         return False
@@ -66,12 +67,11 @@ def update_exit_zone(
     combatants: list[Combatant],
     dt: float,
     now: float,
-    round_start_unix: float,
-    round_duration_initial: float,
+    round_end_unix: float,
     killer: Combatant,
 ) -> None:
     """Track time in exit rects only while escapes are available (open and not rage-sealed)."""
-    escape_open = exits_available_for_escape(now, round_start_unix, round_duration_initial, killer, combatants)
+    escape_open = exits_available_for_escape(now, round_end_unix, killer, combatants)
     rects = _exit_rects
     for c in combatants:
         if c.team != "Survivors" or not c.alive() or c.escaped:

@@ -12,9 +12,10 @@ from outcome_game.constants import (
     KOLLOSIOS_CHARGE_LOW_HP_THRESHOLD,
     KOLLOSIOS_CHARGE_SECONDS,
 )
-from outcome_game.entities import Combatant, clamp_to_arena
+from outcome_game.entities import Combatant, clamp_to_arena, heal_ceiling_for
 from outcome_game.hit_reaction import apply_survivor_hit_speed_boost
 from outcome_game.last_man_standing import last_man_incoming_damage_multiplier
+from outcome_game.survivor_death_revive import resolve_survivor_zero_hp
 
 
 def _flat_dist(a: Combatant, b: Combatant) -> float:
@@ -62,7 +63,9 @@ def _release_all(
         if not s.alive():
             continue
         if s.health < KOLLOSIOS_CHARGE_LOW_HP_THRESHOLD:
-            s.health = min(s.max_health, s.health + KOLLOSIOS_CHARGE_LOW_HP_HEAL)
+            cap = heal_ceiling_for(s)
+            if s.health < cap:
+                s.health = min(cap, s.health + KOLLOSIOS_CHARGE_LOW_HP_HEAL)
         else:
             dmg = KOLLOSIOS_CHARGE_DAMAGE * last_man_incoming_damage_multiplier(s, combatants)
             if s.char_id == "Knuckles" and now < s.knuckles_block_until:
@@ -77,7 +80,7 @@ def _release_all(
             apply_survivor_hit_speed_boost(s, now)
             if s.health <= 0:
                 s.health = 0.0
-                s.dead = True
+                resolve_survivor_zero_hp(s, now, combatants)
     killer.kollosios_grabbed_survivors = []
 
 

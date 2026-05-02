@@ -7,7 +7,7 @@ import time
 import pygame
 
 from outcome_game import ability_service, lms_audio
-from outcome_game.x2011_rage import rage_active, update_killer_stun_immunity
+from outcome_game.x2011_rage import update_killer_stun_immunity
 from outcome_game.ai_service import (
     choose_survivor_bot_ability_index,
     reset_brains,
@@ -22,12 +22,22 @@ from outcome_game.character_definitions import registry as char_registry
 from outcome_game.constants import (
     ARENA_H,
     ARENA_W,
+    GLOBAL_MOVEMENT_SPEED_MULT,
     NUM_SURVIVOR_SLOTS,
     PC_SPRINT_SPEED_MULT,
     X2011_GRAB_MASH_PER_KEY,
 )
 from outcome_game.entities import Combatant
-from outcome_game.hud import draw_end, draw_hud, draw_lobby, draw_world
+from outcome_game.survivor_death_revive import tick_revives
+from outcome_game.arena_maps import activate_random_map, get_active_map_display_name, get_active_theme
+from outcome_game.hud import (
+    apply_escape_post_processing,
+    draw_end,
+    draw_hud,
+    draw_lobby,
+    draw_world,
+    seconds_until_escape_window_opens,
+)
 from outcome_game.match_service import (
     Phase,
     check_winner,
@@ -35,7 +45,14 @@ from outcome_game.match_service import (
     reset_exit_rects,
     update_exit_zone,
 )
-from outcome_game import kollosios_basic_grab, kollosios_charge, sonic_abilities, tails_cannon, x2011_grab
+from outcome_game import (
+    kollosios_basic_grab,
+    kollosios_charge,
+    metal_charge_carry,
+    sonic_abilities,
+    tails_cannon,
+    x2011_grab,
+)
 from outcome_game.arena_navigation import get_arena_walls
 from outcome_game.planar_movement import apply_input_to_velocity, integrate_and_collide
 
@@ -65,7 +82,7 @@ def _make_combatant(
         y=y,
         health=float(d["max_health"]),
         max_health=float(d["max_health"]),
-        base_walk_speed=float(d["base_walk_speed"]),
+        base_walk_speed=float(d["base_walk_speed"]) * GLOBAL_MOVEMENT_SPEED_MULT,
     )
 
 
@@ -89,6 +106,7 @@ def build_match(
     bot-only mode is all AI.
     """
     reset_brains()
+    activate_random_map()
     reset_exit_rects()
     combatants: list[Combatant] = []
     pool = char_registry.get_all_survivor_ids()
@@ -187,6 +205,22 @@ def _update_sonic_trails(combatants: list[Combatant], now: float) -> None:
         if in_peelout or in_drop_dash:
             if not c.sonic_trail or (c.x - c.sonic_trail[-1][0]) ** 2 + (c.y - c.sonic_trail[-1][1]) ** 2 >= 18.0 * 18.0:
                 c.sonic_trail.append((c.x, c.y, now))
+
+
+def _update_metal_charge_trails(combatants: list[Combatant], now: float) -> None:
+    """Track short-lived trail points while Metal Sonic's killer charge is active."""
+    ttl = 0.34
+    step_sq = 18.0 * 18.0
+    for c in combatants:
+        if c.char_id != "MetalSonic":
+            continue
+        c.metal_charge_trail = [(x, y, t) for (x, y, t) in c.metal_charge_trail if now - t <= ttl]
+        if c.metal_charge_until > now:
+            if (
+                not c.metal_charge_trail
+                or (c.x - c.metal_charge_trail[-1][0]) ** 2 + (c.y - c.metal_charge_trail[-1][1]) ** 2 >= step_sq
+            ):
+                c.metal_charge_trail.append((c.x, c.y, now))
 
 
 def main() -> None:
@@ -305,6 +339,7 @@ def main() -> None:
             human = _get_human(combatants)
             killer = _killer(combatants)
 
+            ability_service.tick_metal_charge_windup(combatants, now)
             sonic_abilities.pre_movement_tick(combatants, now)
 
             keys = pygame.key.get_pressed()
@@ -321,10 +356,10 @@ def main() -> None:
                 _update_human_mouse_aim(human)
 
             for c in combatants:
-                if not c.is_bot or c.dead or c.escaped:
+                if not c.is_bot or c.dead or c.downed or c.escaped:
                     continue
                 if c.team == "Survivors":
-                    bx, by = steer_survivor(c, killer, now, dt, round_start_unix, round_duration_initial, combatants)
+                    bx, by = steer_survivor(c, killer, now, dt, round_end_unix, combatants)
                     apply_input_to_velocity(c, bx, by, dt, now, combatants)
                 else:
                     sx, sy = steer_executioner(c, combatants, now, dt)
@@ -353,19 +388,24 @@ def main() -> None:
                         ab_idx = choose_survivor_bot_ability_index(c, killer, combatants)
                         ability_service.try_use_ability(c, ab_idx, now, combatants, killer)
 
+            metal_charge_carry.tick_metal_charge_pre_integrate(combatants, killer, get_arena_walls(), now)
+
             integrate_and_collide(combatants, ARENA_W, ARENA_H, get_arena_walls())
 
             sonic_abilities.post_movement_tick(combatants, killer, ARENA_W, ARENA_H, now)
 
             ability_service.tick_healing_auras(combatants, now, dt)
             ability_service.tick_metal_self_heal(combatants, now, dt)
-            ability_service.process_metal_charge_grab(combatants, killer, now)
+            metal_charge_carry.tick_metal_charge_post_integrate(
+                combatants, killer, ARENA_W, ARENA_H, get_arena_walls(), now, dt
+            )
             ability_service.tick_amy_hammer_throw(combatants, killer, now, dt)
             tails_cannon.tick_tails_hand_cannon(combatants, killer, now, dt)
             x2011_grab.tick_x2011_grab(combatants, killer, ARENA_W, ARENA_H, now, dt)
             kollosios_basic_grab.tick_kollosios_basic_grab(killer, combatants, ARENA_W, ARENA_H, now)
             kollosios_charge.tick_kollosios_charge(combatants, killer, ARENA_W, ARENA_H, now)
             _update_sonic_trails(combatants, now)
+            _update_metal_charge_trails(combatants, now)
 
             # Killer basic melee: AI always tries; human uses LMB (held), Q/E/R are abilities 1–3
             mouse_left = pygame.mouse.get_pressed()[0]
@@ -385,10 +425,10 @@ def main() -> None:
             ):
                 ability_service.try_use_ability(killer, 0, now, combatants, killer)
 
-            update_exit_zone(combatants, dt, now, round_start_unix, round_duration_initial, killer)
+            update_exit_zone(combatants, dt, now, round_end_unix, killer)
 
-            if rage_active(killer, now, combatants):
-                round_end_unix += dt
+            tick_revives(combatants, now, dt)
+
             update_killer_stun_immunity(killer, now)
 
             lms_audio.tick_lms_music(combatants)
@@ -417,10 +457,10 @@ def main() -> None:
                 get_arena_walls(),
                 ARENA_W,
                 ARENA_H,
+                get_active_theme(),
                 round_end_unix,
-                round_start_unix,
-                round_duration_initial,
                 killer,
+                viewer=focus,
             )
             draw_hud(
                 screen,
@@ -428,11 +468,21 @@ def main() -> None:
                 combatants,
                 round_end_unix,
                 round_start_unix,
-                round_duration_initial,
                 get_exit_rects(),
                 (title_font, body_font),
                 spectate=bot_only,
                 killer=killer,
+                map_display_name=get_active_map_display_name(),
+                seconds_until_exit_open=seconds_until_escape_window_opens(now, round_end_unix),
+            )
+            apply_escape_post_processing(
+                screen,
+                now=now,
+                round_end_unix=round_end_unix,
+                killer=killer,
+                combatants=combatants,
+                focus=focus,
+                spectate=bot_only,
             )
         elif phase == Phase.ENDED and winner:
             if combatants:
@@ -449,10 +499,10 @@ def main() -> None:
                     get_arena_walls(),
                     ARENA_W,
                     ARENA_H,
+                    get_active_theme(),
                     round_end_unix,
-                    round_start_unix,
-                    round_duration_initial,
                     killer,
+                    viewer=focus,
                 )
                 draw_hud(
                     screen,
@@ -460,11 +510,11 @@ def main() -> None:
                     combatants,
                     round_end_unix,
                     round_start_unix,
-                    round_duration_initial,
                     get_exit_rects(),
                     (title_font, body_font),
                     spectate=bot_only,
                     killer=killer,
+                    map_display_name=get_active_map_display_name(),
                 )
             draw_end(screen, winner, title_font)
 

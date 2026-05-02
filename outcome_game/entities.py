@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 
 import pygame
 
+from outcome_game.constants import METAL_SONIC_HEAL_CAP
+
 
 @dataclass
 class Combatant:
@@ -27,6 +29,12 @@ class Combatant:
     vy: float = 0.0
     escaped: bool = False
     dead: bool = False
+    downed: bool = False
+    revive_used: bool = False
+    revive_progress: float = 0.0
+    metal_death_burst_until: float = 0.0
+    metal_death_origin_x: float = 0.0
+    metal_death_origin_y: float = 0.0
     internal_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     # Buffs / debuffs: end time (monotonic seconds)
     armor_until: float = 0.0
@@ -60,6 +68,8 @@ class Combatant:
     drop_dash_speed: float = 0.0
     drop_dash_bumps: int = 0
     drop_dash_hit_lock_until: float = 0.0
+    # Last bump: freeze until this time, then resolve bounce (see sonic_abilities.py).
+    drop_dash_finale_until: float = 0.0
     sonic_trail: list[tuple[float, float, float]] = field(default_factory=list)
     # Cream — healing aura (see ability_service.tick_healing_auras)
     healing_aura_until: float = 0.0
@@ -68,7 +78,19 @@ class Combatant:
     metal_self_heal_until: float = 0.0
     metal_self_heal_last_flash_sec: int = -1
     metal_charge_until: float = 0.0
+    metal_charge_windup_until: float = 0.0
     metal_charge_grab_used: bool = False
+    # Metal Sonic — charge carries X2011 (see metal_charge_carry.py)
+    metal_charge_carry_target: Combatant | None = None
+    metal_beatup_anim_until: float = 0.0
+    metal_charge_debris: list[tuple[float, float, float, float, float, tuple[int, int, int]]] = field(
+        default_factory=list
+    )
+    metal_carry_hp_drain_bank: float = 0.0
+    metal_carry_hp_drained_total: float = 0.0
+    metal_charge_trail: list[tuple[float, float, float]] = field(default_factory=list)
+    # Executioner — grabbed by Metal's charge (only X2011 in practice)
+    held_by_metal_charge_carrier: Combatant | None = None
     # Eggman — electric shield (reflect stun on killer hit; see melee_attack)
     eggman_shield_until: float = 0.0
     # Amy — hammer visuals + throw projectile (ability_service / hud)
@@ -117,6 +139,13 @@ class Combatant:
 
     def alive(self) -> bool:
         return not self.dead and self.health > 0
+
+
+def heal_ceiling_for(c: Combatant) -> float:
+    """Maximum HP that healing can restore (Metal Sonic uses max pool but heal cap)."""
+    if c.char_id == "MetalSonic":
+        return min(c.max_health, METAL_SONIC_HEAL_CAP)
+    return c.max_health
 
 
 def clamp_to_arena(c: Combatant, arena_w: float, arena_h: float) -> None:

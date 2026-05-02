@@ -9,17 +9,6 @@ import pygame
 
 from outcome_game.constants import ARENA_H, ARENA_W
 
-# Layout: corridors around edges for exit gates; central obstacles (scaled with ARENA_W/H in constants)
-ARENA_WALLS: list[pygame.Rect] = [
-    pygame.Rect(390, 660, 1020, 42),
-    pygame.Rect(1560, 660, 750, 42),
-    pygame.Rect(390, 1080, 1020, 42),
-    pygame.Rect(1560, 1080, 750, 42),
-    pygame.Rect(1320, 750, 42, 330),
-    pygame.Rect(630, 840, 42, 300),
-    pygame.Rect(2025, 840, 42, 300),
-]
-
 PATH_CELL = 44
 PATH_CLEARANCE = 24.0
 # Aim at a waypoint this far along the path (world units) — avoids stiff cell-to-cell motion
@@ -29,9 +18,22 @@ _blocked_cache: list[list[bool]] | None = None
 _grid_cols = 0
 _grid_rows = 0
 
+_active_walls: list[pygame.Rect] | None = None
+
+
+def set_active_walls(walls: list[pygame.Rect]) -> None:
+    """Swap collision/pathfinding walls (called when a match loads a map)."""
+    global _active_walls, _blocked_cache
+    _active_walls = walls
+    _blocked_cache = None
+
 
 def get_arena_walls() -> list[pygame.Rect]:
-    return ARENA_WALLS
+    if _active_walls is not None:
+        return _active_walls
+    from outcome_game.arena_maps import MAPS
+
+    return list(MAPS["hangar"].walls)
 
 
 def _ensure_grid() -> tuple[list[list[bool]], int, int]:
@@ -46,7 +48,7 @@ def _ensure_grid() -> tuple[list[list[bool]], int, int]:
         for cx in range(cols):
             px = cx * PATH_CELL + PATH_CELL * 0.5
             py = cy * PATH_CELL + PATH_CELL * 0.5
-            for w in ARENA_WALLS:
+            for w in get_arena_walls():
                 ew = w.inflate(inflate, inflate)
                 if ew.collidepoint(px, py):
                     blocked[cy][cx] = True

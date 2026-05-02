@@ -81,6 +81,19 @@ def _smoothed_steer(bot: Combatant, ix: float, iy: float, dt: float) -> tuple[fl
     return b.smooth_dx, b.smooth_dy
 
 
+def _nearest_downed_teammate(bot: Combatant, combatants: list[Combatant]) -> Combatant | None:
+    best: Combatant | None = None
+    best_d = 1e18
+    for c in combatants:
+        if c is bot or c.team != "Survivors" or not c.downed:
+            continue
+        d = _flat_dist(bot, c)
+        if d < best_d:
+            best_d = d
+            best = c
+    return best
+
+
 def _brain(c: Combatant) -> BotBrain:
     bid = c.internal_id
     if bid not in _bot_state:
@@ -98,24 +111,18 @@ def steer_survivor(
     killer: Combatant | None,
     now: float,
     dt: float,
-    round_start_unix: float,
-    round_duration_initial: float,
+    round_end_unix: float,
     combatants: list[Combatant],
 ) -> tuple[float, float]:
     """
     Flees killer when close (exits closed) or blends flee/exit when open.
+    Exit availability follows match_service (timer within last ESCAPE_OPENS_AT_SECONDS_REMAINING seconds).
     When exits are closed and killer is beyond flee radius, patrols interior instead of hugging map edges.
     """
     if killer is None:
         escape_open = False
     else:
-        escape_open = exits_available_for_escape(
-            now,
-            round_start_unix,
-            round_duration_initial,
-            killer,
-            combatants,
-        )
+        escape_open = exits_available_for_escape(now, round_end_unix, killer, combatants)
     if bot.char_id == "Eggman":
         healing_metal = _nearest_healing_metal_sonic(bot, combatants, now)
         killer_near = killer is not None and killer.alive() and _flat_dist(bot, killer) < SURVIVOR_FLEE_RADIUS * 0.85
@@ -128,6 +135,15 @@ def steer_survivor(
         if heal_target is not None and not killer_near:
             rx, ry = pathfind_direction(bot.x, bot.y, heal_target.x, heal_target.y, bot.radius)
             return _smoothed_steer(bot, rx, ry, dt)
+    down_ally = _nearest_downed_teammate(bot, combatants)
+    if (
+        down_ally is not None
+        and killer is not None
+        and killer.alive()
+        and _flat_dist(bot, killer) > SURVIVOR_FLEE_RADIUS * 1.06
+    ):
+        rx, ry = pathfind_direction(bot.x, bot.y, down_ally.x, down_ally.y, bot.radius)
+        return _smoothed_steer(bot, rx, ry, dt)
     if killer is not None and killer.alive():
         stun_range = _ready_stun_engage_range(bot, now)
         if stun_range is not None:

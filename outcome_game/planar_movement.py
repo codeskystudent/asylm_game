@@ -24,14 +24,27 @@ def apply_input_to_velocity(
     sprint_mult: float = 1.0,
 ) -> None:
     """Planar top-down movement: desired direction from input, speed from definition + buffs."""
-    if c.dead or c.escaped:
+    if c.dead or c.escaped or c.downed:
         c.vx = c.vy = 0.0
         return
-    if now < c.stunned_until:
+
+    if c.char_id == "Sonic" and c.drop_dash_finale_until > now:
+        c.vx = c.vy = 0.0
+        return
+
+    if c.char_id == "MetalSonic" and c.metal_charge_windup_until > now:
+        length = math.hypot(input_x, input_y)
+        if length > 1e-6:
+            c.facing_x = input_x / length
+            c.facing_y = input_y / length
         c.vx = c.vy = 0.0
         return
 
     if c.grabbed_by is not None:
+        c.vx = c.vy = 0.0
+        return
+
+    if c.held_by_metal_charge_carrier is not None:
         c.vx = c.vy = 0.0
         return
 
@@ -48,6 +61,18 @@ def apply_input_to_velocity(
         return
 
     if c.carried_by_peelout:
+        c.vx = c.vy = 0.0
+        return
+
+    # Knockback / slam displacement (runs while stunned, but not while grabbed / carried).
+    if now < c.dash_until:
+        lm = last_man_standing_speed_mult(c, combatants) if c.team == "Survivors" else 1.0
+        c.vx = c.dash_vx * lm
+        c.vy = c.dash_vy * lm
+        c.x += c.vx * dt
+        c.y += c.vy * dt
+        return
+    if now < c.stunned_until:
         c.vx = c.vy = 0.0
         return
 
@@ -168,14 +193,6 @@ def apply_input_to_velocity(
     if sprint_mult > 1.0:
         sp *= sprint_mult
 
-    if now < c.dash_until:
-        lm = last_man_standing_speed_mult(c, combatants) if c.team == "Survivors" else 1.0
-        c.vx = c.dash_vx * lm
-        c.vy = c.dash_vy * lm
-        c.x += c.vx * dt
-        c.y += c.vy * dt
-        return
-
     length = math.hypot(input_x, input_y)
     if length > 1e-6:
         nx = input_x / length
@@ -221,6 +238,15 @@ def _peelout_carry_pair(a: Combatant, b: Combatant) -> bool:
     return False
 
 
+def _survivor_executioner_phase_pair(a: Combatant, b: Combatant) -> bool:
+    """Survivors pass through the executioner (no circle separation)."""
+    if a.team == "Survivors" and b.team == "Executioners":
+        return True
+    if b.team == "Survivors" and a.team == "Executioners":
+        return True
+    return False
+
+
 def integrate_and_collide(
     combatants: list[Combatant],
     arena_w: float,
@@ -232,6 +258,10 @@ def integrate_and_collide(
             clamp_to_arena(c, arena_w, arena_h)
             for _ in range(6):
                 resolve_combatant_walls(c, walls)
+    # Dead survivors are skipped above; clamp corpses so draws/VFX stay on the floor.
+    for c in combatants:
+        if c.team == "Survivors" and c.dead and not c.escaped:
+            clamp_to_arena(c, arena_w, arena_h)
     n = len(combatants)
     for i in range(n):
         for j in range(i + 1, n):
@@ -247,5 +277,7 @@ def integrate_and_collide(
             if _kollosios_basic_grab_pair(a, b):
                 continue
             if _x2011_grab_pair(a, b):
+                continue
+            if _survivor_executioner_phase_pair(a, b):
                 continue
             separate_circles(a, b)
